@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"v2ray.com/core/app/dns/fakedns"
 
 	"v2ray.com/core"
 	"v2ray.com/core/app/router"
@@ -339,7 +340,7 @@ func (s *Server) LookupFakeIP(domain string) ([]net.IP, error) {
 	if domain[len(domain)-1] == '.' {
 		domain = domain[:len(domain)-1]
 	}
-	ips := GetDefaultFakeDnsFromContext(s.ctx).GetFakeIPForDomain(domain)
+	ips := fakedns.GetDefaultFakeDnsFromContext(s.ctx).GetFakeIPForDomain(domain)
 	newError("returning fake IP ", ips[0].String(), " for domain ", domain).WriteToLog()
 	return toNetIP(ips), nil
 }
