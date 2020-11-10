@@ -60,6 +60,7 @@ func toProtocolList(s []string) ([]proxyman.KnownProtocols, error) {
 type SniffingConfig struct {
 	Enabled      bool        `json:"enabled"`
 	DestOverride *StringList `json:"destOverride"`
+	MetadataOnly bool        `json:"metadataOnly"`
 }
 
 // Build implements Buildable.
@@ -81,6 +82,7 @@ func (c *SniffingConfig) Build() (*proxyman.SniffingConfig, error) {
 	return &proxyman.SniffingConfig{
 		Enabled:             c.Enabled,
 		DestinationOverride: p,
+		MetadataOnly:        c.MetadataOnly,
 	}, nil
 }
 
@@ -344,6 +346,7 @@ type Config struct {
 	API             *APIConfig             `json:"api"`
 	Stats           *StatsConfig           `json:"stats"`
 	Reverse         *ReverseConfig         `json:"reverse"`
+	FakeDns         *FakeDnsConfig         `json:"fakeDns"`
 }
 
 func (c *Config) findInboundTag(tag string) int {
@@ -468,6 +471,10 @@ func applyTransportConfig(s *StreamConfig, t *TransportConfig) {
 
 // Build implements Buildable.
 func (c *Config) Build() (*core.Config, error) {
+	if err := PostProcessConfigureFile(c); err != nil {
+		return nil, err
+	}
+
 	config := &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(&dispatcher.Config{}),
@@ -528,6 +535,14 @@ func (c *Config) Build() (*core.Config, error) {
 
 	if c.Reverse != nil {
 		r, err := c.Reverse.Build()
+		if err != nil {
+			return nil, err
+		}
+		config.App = append(config.App, serial.ToTypedMessage(r))
+	}
+
+	if c.FakeDns != nil {
+		r, err := c.FakeDns.Build()
 		if err != nil {
 			return nil, err
 		}
