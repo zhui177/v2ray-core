@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"v2ray.com/core/app/dns/fakedns"
-
 	"v2ray.com/core"
 	"v2ray.com/core/app/router"
 	"v2ray.com/core/common"
@@ -39,7 +37,9 @@ type Server struct {
 	matcherInfos  []DomainMatcherInfo // matcherIdx -> DomainMatcherInfo
 	tag           string
 	fakeEnabled   bool
-	ctx           context.Context
+	fakeDnsEngine dns.FakeDnsEngine
+
+	ctx context.Context
 }
 
 // DomainMatcherInfo contains information attached to index returned by Server.domainMatcher
@@ -87,6 +87,16 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 		fakeEnabled: fake,
 		ctx:         ctx,
 	}
+
+	if fake {
+		err := core.RequireFeatures(ctx, func(fdns dns.FakeDnsEngine) {
+			server.fakeDnsEngine = fdns
+		})
+		if err != nil {
+			return nil, newError("Unable to locate a fake DNS Engine").Base(err).AtError()
+		}
+	}
+
 	if server.tag == "" {
 		server.tag = generateRandomTag()
 	}
@@ -340,7 +350,7 @@ func (s *Server) LookupFakeIP(domain string) ([]net.IP, error) {
 	if domain[len(domain)-1] == '.' {
 		domain = domain[:len(domain)-1]
 	}
-	ips := fakedns.GetDefaultFakeDnsFromContext(s.ctx).GetFakeIPForDomain(domain)
+	ips := s.fakeDnsEngine.GetFakeIPForDomain(domain)
 	newError("returning fake IP ", ips[0].String(), " for domain ", domain).WriteToLog()
 	return toNetIP(ips), nil
 }
