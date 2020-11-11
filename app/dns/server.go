@@ -37,7 +37,7 @@ type Server struct {
 	matcherInfos  []DomainMatcherInfo // matcherIdx -> DomainMatcherInfo
 	tag           string
 	fakeEnabled   bool
-	fakeDnsEngine dns.FakeDnsEngine
+	fakeDNSEngine dns.FakeDNSEngine
 
 	ctx context.Context
 }
@@ -89,8 +89,8 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 	}
 
 	if fake {
-		err := core.RequireFeatures(ctx, func(fdns dns.FakeDnsEngine) {
-			server.fakeDnsEngine = fdns
+		err := core.RequireFeatures(ctx, func(fdns dns.FakeDNSEngine) {
+			server.fakeDNSEngine = fdns
 		})
 		if err != nil {
 			return nil, newError("Unable to locate a fake DNS Engine").Base(err).AtError()
@@ -350,7 +350,7 @@ func (s *Server) LookupFakeIP(domain string) ([]net.IP, error) {
 	if domain[len(domain)-1] == '.' {
 		domain = domain[:len(domain)-1]
 	}
-	ips := s.fakeDnsEngine.GetFakeIPForDomain(domain)
+	ips := s.fakeDNSEngine.GetFakeIPForDomain(domain)
 	newError("returning fake IP ", ips[0].String(), " for domain ", domain).WriteToLog()
 	return toNetIP(ips), nil
 }
