@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"golang.org/x/net/http2"
-
 	"v2ray.com/core"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
@@ -170,6 +169,7 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 			rawConn.Close()
 			return nil, err
 		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			rawConn.Close()
@@ -191,7 +191,7 @@ func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, u
 			wg.Done()
 		}()
 
-		resp, err := h2clientConn.RoundTrip(req)
+		resp, err := h2clientConn.RoundTrip(req) // nolint: bodyclose
 		if err != nil {
 			rawConn.Close()
 			return nil, err

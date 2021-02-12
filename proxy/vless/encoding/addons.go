@@ -6,20 +6,16 @@ import (
 	"io"
 
 	"github.com/golang/protobuf/proto"
-
 	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/protocol"
 )
 
 // EncodeHeaderAddons Add addons byte to the header
 func EncodeHeaderAddons(buffer *buf.Buffer, addons *Addons) error {
-	switch addons.Flow {
-	default:
-		if err := buffer.WriteByte(0); err != nil {
-			return newError("failed to write addons protobuf length").Base(err)
-		}
+	if err := buffer.WriteByte(0); err != nil {
+		return newError("failed to write addons protobuf length").Base(err)
 	}
-
 	return nil
 }
 
@@ -39,11 +35,6 @@ func DecodeHeaderAddons(buffer *buf.Buffer, reader io.Reader) (*Addons, error) {
 		if err := proto.Unmarshal(buffer.Bytes(), addons); err != nil {
 			return nil, newError("failed to unmarshal addons protobuf value").Base(err)
 		}
-
-		// Verification.
-		switch addons.Flow {
-		default:
-		}
 	}
 
 	return addons, nil
@@ -51,22 +42,16 @@ func DecodeHeaderAddons(buffer *buf.Buffer, reader io.Reader) (*Addons, error) {
 
 // EncodeBodyAddons returns a Writer that auto-encrypt content written by caller.
 func EncodeBodyAddons(writer io.Writer, request *protocol.RequestHeader, addons *Addons) buf.Writer {
-	switch addons.Flow {
-	default:
-		if request.Command == protocol.RequestCommandUDP {
-			return NewMultiLengthPacketWriter(writer.(buf.Writer))
-		}
+	if request.Command == protocol.RequestCommandUDP {
+		return NewMultiLengthPacketWriter(writer.(buf.Writer))
 	}
 	return buf.NewWriter(writer)
 }
 
 // DecodeBodyAddons returns a Reader from which caller can fetch decrypted body.
 func DecodeBodyAddons(reader io.Reader, request *protocol.RequestHeader, addons *Addons) buf.Reader {
-	switch addons.Flow {
-	default:
-		if request.Command == protocol.RequestCommandUDP {
-			return NewLengthPacketReader(reader)
-		}
+	if request.Command == protocol.RequestCommandUDP {
+		return NewLengthPacketReader(reader)
 	}
 	return buf.NewReader(reader)
 }
@@ -83,7 +68,12 @@ type MultiLengthPacketWriter struct {
 
 func (w *MultiLengthPacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	defer buf.ReleaseMulti(mb)
-	mb2Write := make(buf.MultiBuffer, 0, len(mb)+1)
+
+	if len(mb)+1 > 64*1024*1024 {
+		return errors.New("value too large")
+	}
+	sliceSize := len(mb) + 1
+	mb2Write := make(buf.MultiBuffer, 0, sliceSize)
 	for _, b := range mb {
 		length := b.Len()
 		if length == 0 || length+2 > buf.Size {

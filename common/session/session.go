@@ -57,6 +57,7 @@ type Outbound struct {
 type SniffingRequest struct {
 	OverrideDestinationForProtocol []string
 	Enabled                        bool
+	MetadataOnly                   bool
 }
 
 // Content is the metadata of the connection content.
@@ -68,7 +69,7 @@ type Content struct {
 
 	Attributes map[string]string
 
-	SkipRoutePick bool
+	SkipDNSResolve bool
 }
 
 // Sockopt is the settings for socket connection.

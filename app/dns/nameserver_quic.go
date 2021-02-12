@@ -3,136 +3,79 @@
 package dns
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"io"
-	"io/ioutil"
-	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/lucas-clemente/quic-go"
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/http2"
 	"v2ray.com/core/common"
+	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol/dns"
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal/pubsub"
 	"v2ray.com/core/common/task"
 	dns_feature "v2ray.com/core/features/dns"
-	"v2ray.com/core/features/routing"
-	"v2ray.com/core/transport/internet"
+	"v2ray.com/core/transport/internet/tls"
 )
 
-// DoHNameServer implemented DNS over HTTPS (RFC8484) Wire Format,
-// which is compatible with traditional dns over udp(RFC1035),
-// thus most of the DOH implementation is copied from udpns.go
-type DoHNameServer struct {
+// NextProtoDQ - During connection establishment, DNS/QUIC support is indicated
+// by selecting the ALPN token "dq" in the crypto handshake.
+const NextProtoDQ = "doq-i00"
+
+const handshakeTimeout = time.Second * 8
+
+// QUICNameServer implemented DNS over QUIC
+type QUICNameServer struct {
 	sync.RWMutex
-	ips        map[string]record
-	pub        *pubsub.Service
-	cleanup    *task.Periodic
-	reqID      uint32
-	clientIP   net.IP
-	httpClient *http.Client
-	dohURL     string
-	name       string
+	ips         map[string]record
+	pub         *pubsub.Service
+	cleanup     *task.Periodic
+	reqID       uint32
+	name        string
+	destination net.Destination
+	session     quic.Session
 }
 
-// NewDoHNameServer creates DOH client object for remote resolving
-func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, clientIP net.IP) (*DoHNameServer, error) {
-	newError("DNS: created Remote DOH client for ", url.String()).AtInfo().WriteToLog()
-	s := baseDOHNameServer(url, "DOH", clientIP)
+// NewQUICNameServer creates DNS-over-QUIC client object for local resolving
+func NewQUICNameServer(url *url.URL) (*QUICNameServer, error) {
+	newError("DNS: created Local DNS-over-QUIC client for ", url.String()).AtInfo().WriteToLog()
 
-	// Dispatched connection will be closed (interrupted) after each request
-	// This makes DOH inefficient without a keep-alived connection
-	// See: core/app/proxyman/outbound/handler.go:113
-	// Using mux (https request wrapped in a stream layer) improves the situation.
-	// Recommend to use NewDoHLocalNameServer (DOHL:) if v2ray instance is running on
-	//  a normal network eg. the server side of v2ray
-	tr := &http.Transport{
-		MaxIdleConns:        30,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 30 * time.Second,
-		ForceAttemptHTTP2:   true,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := net.ParseDestination(network + ":" + addr)
-			if err != nil {
-				return nil, err
-			}
-
-			link, err := dispatcher.Dispatch(ctx, dest)
-			if err != nil {
-				return nil, err
-			}
-			return net.NewConnection(
-				net.ConnectionInputMulti(link.Writer),
-				net.ConnectionOutputMulti(link.Reader),
-			), nil
-		},
+	var err error
+	port := net.Port(784)
+	if url.Port() != "" {
+		port, err = net.PortFromString(url.Port())
+		if err != nil {
+			return nil, err
+		}
 	}
+	dest := net.UDPDestination(net.DomainAddress(url.Hostname()), port)
 
-	dispatchedClient := &http.Client{
-		Transport: tr,
-		Timeout:   60 * time.Second,
-	}
-
-	s.httpClient = dispatchedClient
-	return s, nil
-}
-
-// NewDoHLocalNameServer creates DOH client object for local resolving
-func NewDoHLocalNameServer(url *url.URL, clientIP net.IP) *DoHNameServer {
-	url.Scheme = "https"
-	s := baseDOHNameServer(url, "DOHL", clientIP)
-	tr := &http.Transport{
-		IdleConnTimeout:   90 * time.Second,
-		ForceAttemptHTTP2: true,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := net.ParseDestination(network + ":" + addr)
-			if err != nil {
-				return nil, err
-			}
-			conn, err := internet.DialSystem(ctx, dest, nil)
-			if err != nil {
-				return nil, err
-			}
-			return conn, nil
-		},
-	}
-	s.httpClient = &http.Client{
-		Timeout:   time.Second * 180,
-		Transport: tr,
-	}
-	newError("DNS: created Local DOH client for ", url.String()).AtInfo().WriteToLog()
-	return s
-}
-
-func baseDOHNameServer(url *url.URL, prefix string, clientIP net.IP) *DoHNameServer {
-	s := &DoHNameServer{
-		ips:      make(map[string]record),
-		clientIP: clientIP,
-		pub:      pubsub.NewService(),
-		name:     prefix + "//" + url.Host,
-		dohURL:   url.String(),
+	s := &QUICNameServer{
+		ips:         make(map[string]record),
+		pub:         pubsub.NewService(),
+		name:        url.String(),
+		destination: dest,
 	}
 	s.cleanup = &task.Periodic{
 		Interval: time.Minute,
 		Execute:  s.Cleanup,
 	}
 
-	return s
+	return s, nil
 }
 
 // Name returns client name
-func (s *DoHNameServer) Name() string {
+func (s *QUICNameServer) Name() string {
 	return s.name
 }
 
 // Cleanup clears expired items from cache
-func (s *DoHNameServer) Cleanup() error {
+func (s *QUICNameServer) Cleanup() error {
 	now := time.Now()
 	s.Lock()
 	defer s.Unlock()
@@ -164,7 +107,7 @@ func (s *DoHNameServer) Cleanup() error {
 	return nil
 }
 
-func (s *DoHNameServer) updateIP(req *dnsRequest, ipRec *IPRecord) {
+func (s *QUICNameServer) updateIP(req *dnsRequest, ipRec *IPRecord) {
 	elapsed := time.Since(req.start)
 
 	s.Lock()
@@ -205,14 +148,14 @@ func (s *DoHNameServer) updateIP(req *dnsRequest, ipRec *IPRecord) {
 	common.Must(s.cleanup.Start())
 }
 
-func (s *DoHNameServer) newReqID() uint16 {
+func (s *QUICNameServer) newReqID() uint16 {
 	return uint16(atomic.AddUint32(&s.reqID, 1))
 }
 
-func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPOption) {
+func (s *QUICNameServer) sendQuery(ctx context.Context, domain string, clientIP net.IP, option IPOption) {
 	newError(s.name, " querying: ", domain).AtInfo().WriteToLog(session.ExportIDToError(ctx))
 
-	reqs := buildReqMsgs(domain, option, s.newReqID, genEDNS0Options(s.clientIP))
+	reqs := buildReqMsgs(domain, option, s.newReqID, genEDNS0Options(clientIP))
 
 	var deadline time.Time
 	if d, ok := ctx.Deadline(); ok {
@@ -233,12 +176,9 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 			}
 
 			dnsCtx = session.ContextWithContent(dnsCtx, &session.Content{
-				Protocol:      "https",
-				SkipRoutePick: true,
+				Protocol:       "quic",
+				SkipDNSResolve: true,
 			})
-
-			// forced to use mux for DOH
-			dnsCtx = session.ContextWithMuxPrefered(dnsCtx, true)
 
 			var cancel context.CancelFunc
 			dnsCtx, cancel = context.WithDeadline(dnsCtx, deadline)
@@ -249,14 +189,32 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 				newError("failed to pack dns query").Base(err).AtError().WriteToLog()
 				return
 			}
-			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
+
+			conn, err := s.openStream(dnsCtx)
 			if err != nil {
-				newError("failed to retrieve response").Base(err).AtError().WriteToLog()
+				newError("failed to open quic session").Base(err).AtError().WriteToLog()
 				return
 			}
-			rec, err := parseResponse(resp)
+
+			_, err = conn.Write(b.Bytes())
 			if err != nil {
-				newError("failed to handle DOH response").Base(err).AtError().WriteToLog()
+				newError("failed to send query").Base(err).AtError().WriteToLog()
+				return
+			}
+
+			_ = conn.Close()
+
+			respBuf := buf.New()
+			defer respBuf.Release()
+			n, err := respBuf.ReadFrom(conn)
+			if err != nil && n == 0 {
+				newError("failed to read response").Base(err).AtError().WriteToLog()
+				return
+			}
+
+			rec, err := parseResponse(respBuf.Bytes())
+			if err != nil {
+				newError("failed to handle response").Base(err).AtError().WriteToLog()
 				return
 			}
 			s.updateIP(r, rec)
@@ -264,31 +222,7 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, option IPO
 	}
 }
 
-func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, error) {
-	body := bytes.NewBuffer(b)
-	req, err := http.NewRequest("POST", s.dohURL, body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Accept", "application/dns-message")
-	req.Header.Add("Content-Type", "application/dns-message")
-
-	resp, err := s.httpClient.Do(req.WithContext(ctx))
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(ioutil.Discard, resp.Body) // flush resp.Body so that the conn is reusable
-		return nil, fmt.Errorf("DOH server returned code %d", resp.StatusCode)
-	}
-
-	return ioutil.ReadAll(resp.Body)
-}
-
-func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.IP, error) {
+func (s *QUICNameServer) findIPsForDomain(domain string, option IPOption) ([]net.IP, error) {
 	s.RLock()
 	record, found := s.ips[domain]
 	s.RUnlock()
@@ -316,7 +250,7 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 	}
 
 	if len(ips) > 0 {
-		return toNetIP(ips), nil
+		return toNetIP(ips)
 	}
 
 	if lastErr != nil {
@@ -331,7 +265,7 @@ func (s *DoHNameServer) findIPsForDomain(domain string, option IPOption) ([]net.
 }
 
 // QueryIP is called from dns.Server->queryIPTimeout
-func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOption) ([]net.IP, error) {
+func (s *QUICNameServer) QueryIP(ctx context.Context, domain string, clientIP net.IP, option IPOption) ([]net.IP, error) {
 	fqdn := Fqdn(domain)
 
 	ips, err := s.findIPsForDomain(fqdn, option)
@@ -366,7 +300,7 @@ func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOpt
 		}
 		close(done)
 	}()
-	s.sendQuery(ctx, fqdn, option)
+	s.sendQuery(ctx, fqdn, clientIP, option)
 
 	for {
 		ips, err := s.findIPsForDomain(fqdn, option)
@@ -380,4 +314,71 @@ func (s *DoHNameServer) QueryIP(ctx context.Context, domain string, option IPOpt
 		case <-done:
 		}
 	}
+}
+
+func isActive(s quic.Session) bool {
+	select {
+	case <-s.Context().Done():
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *QUICNameServer) getSession() (quic.Session, error) {
+	var session quic.Session
+	s.RLock()
+	session = s.session
+	if session != nil && isActive(session) {
+		s.RUnlock()
+		return session, nil
+	}
+	if session != nil {
+		// we're recreating the session, let's create a new one
+		_ = session.CloseWithError(0, "")
+	}
+	s.RUnlock()
+
+	s.Lock()
+	defer s.Unlock()
+
+	var err error
+	session, err = s.openSession()
+	if err != nil {
+		// This does not look too nice, but QUIC (or maybe quic-go)
+		// doesn't seem stable enough.
+		// Maybe retransmissions aren't fully implemented in quic-go?
+		// Anyways, the simple solution is to make a second try when
+		// it fails to open the QUIC session.
+		session, err = s.openSession()
+		if err != nil {
+			return nil, err
+		}
+	}
+	s.session = session
+	return session, nil
+}
+
+func (s *QUICNameServer) openSession() (quic.Session, error) {
+	tlsConfig := tls.Config{}
+	quicConfig := &quic.Config{
+		HandshakeTimeout: handshakeTimeout,
+	}
+
+	session, err := quic.DialAddrContext(context.Background(), s.destination.NetAddr(), tlsConfig.GetTLSConfig(tls.WithNextProto("http/1.1", http2.NextProtoTLS, NextProtoDQ)), quicConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return session, nil
+}
+
+func (s *QUICNameServer) openStream(ctx context.Context) (quic.Stream, error) {
+	session, err := s.getSession()
+	if err != nil {
+		return nil, err
+	}
+
+	// open a new stream
+	return session.OpenStreamSync(ctx)
 }

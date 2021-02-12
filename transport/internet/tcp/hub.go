@@ -40,13 +40,13 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, streamSe
 	}
 	var listener net.Listener
 	var err error
-	if port == net.Port(0) { //unix
+	if port == net.Port(0) { // unix
 		listener, err = internet.ListenSystem(ctx, &net.UnixAddr{
 			Name: address.Domain(),
 			Net:  "unix",
 		}, streamSettings.SocketSettings)
 		if err != nil {
-			return nil, newError("failed to listen Unix Doman Socket on ", address).Base(err)
+			return nil, newError("failed to listen Unix Domain Socket on ", address).Base(err)
 		}
 		newError("listening Unix Domain Socket on ", address).WriteToLog(session.ExportIDToError(ctx))
 		locker := ctx.Value(address.Domain())

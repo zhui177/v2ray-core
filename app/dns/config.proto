@@ -12,6 +12,7 @@ import "app/router/config.proto";
 
 message NameServer {
   v2ray.core.common.net.Endpoint address = 1;
+  bytes client_ip = 5;
 
   message PriorityDomain {
     DomainMatchingType type = 1;
@@ -68,4 +69,6 @@ message Config {
 
   // Tag is the inbound tag of DNS client.
   string tag = 6;
+
+  reserved 7;
 }

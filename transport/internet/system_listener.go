@@ -29,7 +29,7 @@ func getControlFunc(ctx context.Context, sockopt *SocketConfig, controllers []co
 				}
 			}
 
-			setReusePort(fd)
+			setReusePort(fd) // nolint: staticcheck
 
 			for _, controller := range controllers {
 				if err := controller(network, address, fd); err != nil {
@@ -54,7 +54,7 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 		lc.Control = nil
 		network = addr.Network()
 		address = addr.Name
-		if runtime.GOOS == "linux" && address[0] == '@' {
+		if (runtime.GOOS == "linux" || runtime.GOOS == "android") && address[0] == '@' {
 			// linux abstract unix domain socket is lockfree
 			if len(address) > 1 && address[1] == '@' {
 				// but may need padding to work with haproxy
@@ -71,7 +71,7 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 			if err != nil {
 				return nil, err
 			}
-			ctx = context.WithValue(ctx, address, locker)
+			ctx = context.WithValue(ctx, address, locker) // nolint: golint,staticcheck
 		}
 	}
 
